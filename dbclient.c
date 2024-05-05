@@ -8,8 +8,10 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include "msg.h"
 
 #define BUF 256
+#define MAX_NAME_LEN 128
 
 void Usage(char *progname);
 
@@ -21,6 +23,9 @@ int LookupName(char *name,
 int Connect(const struct sockaddr_storage *addr,
              const size_t addrlen,
              int *ret_fd);
+
+void put_record(int socket_fd);
+void get_record(int socket_fd);
 
 int
 main(int argc, char **argv) {
@@ -46,38 +51,30 @@ main(int argc, char **argv) {
     Usage(argv[0]);
   }
 
-  // Read something from the remote host.
-  // Will only read BUF-1 characters at most.
-  char readbuf[BUF];
-  int res;
-    res = read(socket_fd, readbuf, BUF-1);
-    if (res == 0) {
-      printf("socket closed prematurely \n");
-      close(socket_fd);
-      return EXIT_FAILURE;
-    }
-    if (res == -1) {
-      printf("socket read failure \n");
-      close(socket_fd);
-      return EXIT_FAILURE;
-    }
-    readbuf[res] = '\0';
-    printf("%s", readbuf);
+  printf("Ready to communicate with %s:%s\n", argv[1], argv[2]);
 
-  // Write something to the remote host.
-    int wres = write(socket_fd, readbuf, res);
-    if (wres == 0) {
-     printf("socket closed prematurely \n");
-      close(socket_fd);
-      return EXIT_FAILURE;
-    }
-    if (wres == -1) {
-      printf("socket write failure \n");
-      close(socket_fd);
-      return EXIT_FAILURE;
-    }
 
-  // Clean up.
+  int choice; 
+  do{
+    printf("Enter your choice (1 to put, 2 to get, 0 to quit): ");
+    scanf("%d", &choice);
+    getchar(); // consume the newline
+
+    switch(choice){
+      case 1:
+        put_record(socket_fd);
+      break;
+      case 2:
+        get_record(socket_fd);
+      break;
+      case 0:
+        break;
+      default:
+        printf("Invalid choice\n");
+        break;
+    }
+  }while(choice != 0);
+
   close(socket_fd);
   return EXIT_SUCCESS;
 }
@@ -151,6 +148,68 @@ Connect(const struct sockaddr_storage *addr,
     return 0;
   }
 
+
   *ret_fd = socket_fd;
   return 1;
 }
+
+void put_record(int socket_fd){
+  struct record new_record;
+  printf("Enter the name: ");
+  fgets(new_record.name, MAX_NAME_LEN, stdin);
+  new_record.name[strlen(new_record.name) - 1] = "\0";
+
+  printf("Enter the id: ");
+  char input[MAX_NAME_LEN];
+  fgets(input, MAX_NAME_LEN, stdin);
+  new_record.id = atoi(input);
+
+  struct msg request = {PUT, new_record};
+  if(send(socket_fd, &request, sizeof(request), 0) <= 0){
+    printf("Error sending request\n");
+    return;
+  }
+
+  struct msg response; 
+  if(recv(socket_fd, &response, sizeof(response), 0) <= 0){
+    printf("Error receiving response\n");
+    return;
+  }
+  if(response.type == SUCCESS){
+    printf("Put success\n");
+  }
+  else if (response.type == FAIL){
+    printf("put failed\n");
+  }
+}
+
+void get_record(int socket_fd){
+  uint32_t id;
+  printf("Enter the id: ");
+
+  char input[MAX_NAME_LEN];
+  fgets(input, MAX_NAME_LEN, stdin);
+  id = atoi(input);
+
+  struct record search_record;
+  search_record.id = id;
+  struct msg request = {GET, search_record};
+  if(send(socket_fd, &request, sizeof(request), 0) <= 0){
+    printf("Error sending request\n");
+    return;
+  }
+
+  struct msg response; 
+  if(recv(socket_fd, &response, sizeof(response), 0) <= 0){
+    printf("Error receiving response\n");
+    return;
+  }
+
+  if(response.type == SUCCESS){
+    printf("name: %s\n", search_record.name);
+    printf("id: %d\n", search_record.id);
+  }
+  else if (response.type == FAIL){
+    printf("get failed");
+  }
+} 

@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <pthread.h>
+#include "msg.h"
 
 void Usage(char *progname);
 void PrintOut(int fd, struct sockaddr *addr, size_t addrlen);
@@ -42,6 +43,7 @@ main(int argc, char **argv) {
     int c_fd = accept(listen_fd,
                            (struct sockaddr *)(&caddr),
                            &caddr_len);
+
     if (c_fd < 0) {
       if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK)){
         continue;
@@ -54,6 +56,7 @@ main(int argc, char **argv) {
     pthread_create(&tid, NULL, HandleClient, (void *)c_fd);
     pthread_detach(tid);
   }
+
 
   // Close socket
   close(listen_fd);
@@ -224,46 +227,79 @@ Listen(char *portnum, int *sock_family) {
   return listen_fd;
 }
 
-void
-HandleClient(void *arg) {
+void HandleClient(void *arg) {
   int c_fd = (int)arg;
 
-  struct sockaddr_storage addr;
-  socklen_t addrlen = sizeof(addr);
-  getpeername(c_fd, (struct sockaddr *)(&addr), &addrlen);
-
-  // Print out information about the client.
-  pthread_mutex_lock(&mutex);
-  PrintOut(c_fd, (struct sockaddr *)(&addr), addrlen);
-  PrintReverseDNS((struct sockaddr *)(&addr), addrlen);
-  PrintServerSide(c_fd, addr.ss_family);
-  pthread_mutex_unlock(&mutex);
-
-  // Loop, reading data and echo'ing it back, until the client
-  // closes the connection.
-  while (1) {
-    char clientbuf[1024];
-    ssize_t res = read(c_fd, clientbuf, 1023);
-    if (res == 0) {
-      printf("[The client disconnected.] \n");
-      break;
-    }
-
-    if (res == -1) {
-      if ((errno == EAGAIN) || (errno == EINTR))
-        continue;
-
-	  printf(" Error on client socket:%d \n ", strerror(errno));
-      break;
-    }
-    clientbuf[res] = '\0';
-    printf("the client sent: %s \n", clientbuf);
-
-    // Really should do this in a loop in case of EAGAIN, EINTR,
-    // or short write, but I'm lazy.  Don't be like me. ;)
-    write(c_fd, "You typed: ", strlen("You typed: "));
-    write(c_fd, clientbuf, strlen(clientbuf));
+  struct msg request;
+  ssize_t byte_count = recv(c_fd, &request, sizeof(request), 0);
+  if (byte_count == -1) {
+    printf("Error on client socket: %s\n", strerror(errno));
+    close(c_fd);
+    pthread_exit(NULL);
+  } else if (byte_count == 0) {
+    close(c_fd);
+    pthread_exit(NULL);
   }
 
+  if (request.type == PUT) {
+    // Write to db
+    FILE *database = fopen("db", "a");
+
+    if (database == NULL) {
+      printf("Error opening database: %s\n", strerror(errno));
+      close(c_fd);
+      pthread_exit(NULL);
+    }
+
+    pthread_mutex_lock(&mutex);
+    fwrite(&request.rd, sizeof(request.rd), 1, database);
+    pthread_mutex_unlock(&mutex);
+
+    fclose(database);
+
+    // Success response
+    struct msg response = {SUCCESS};
+    if (send(c_fd, &response, sizeof(response), 0) == -1) {
+      printf("Error sending response: %s\n", strerror(errno));
+    }
+  } else if (request.type == GET) {
+    FILE *database = fopen("db", "r");
+
+    if (database == NULL) {
+      printf("Error opening database: %s\n", strerror(errno));
+      close(c_fd);
+      pthread_exit(NULL);
+    }
+
+    struct record found_record;
+
+    pthread_mutex_lock(&mutex);
+    while (fread(&found_record, sizeof(found_record), 1, database) == 1) {
+      if (found_record.id == request.rd.id) {
+
+        struct msg response = {SUCCESS, found_record};
+        if (send(c_fd, &response, sizeof(response), 0) == -1) {
+          printf("Error sending response: %s\n", strerror(errno));
+        }
+        pthread_mutex_unlock(&mutex);
+        close(c_fd);
+        fclose(database);
+        pthread_exit(NULL);
+      }
+    }
+
+    pthread_mutex_unlock(&mutex);
+    fclose(database);
+
+    // Failure response
+    struct msg response = {FAIL};
+    if (send(c_fd, &response, sizeof(response), 0) == -1) {
+      printf("Error sending response: %s\n", strerror(errno));
+    }
+  } else {
+    close(c_fd);
+    pthread_exit(NULL);
+  }
   close(c_fd);
+  pthread_exit(NULL);
 }
