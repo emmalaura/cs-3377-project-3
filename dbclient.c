@@ -1,215 +1,142 @@
-#include <arpa/inet.h>
-#include <assert.h>
-#include <errno.h>
-#include <netdb.h>
-#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+#include <unistd.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "msg.h"
 
-#define BUF 256
-#define MAX_NAME_LEN 128
+void put_record(int sock_fd);
+void get_record(int sock_fd);
 
-void Usage(char *progname);
-
-int LookupName(char *name,
-                unsigned short port,
-                struct sockaddr_storage *ret_addr,
-                size_t *ret_addrlen);
-
-int Connect(const struct sockaddr_storage *addr,
-             const size_t addrlen,
-             int *ret_fd);
-
-void put_record(int socket_fd);
-void get_record(int socket_fd);
-
-int
-main(int argc, char **argv) {
-  if (argc != 3) {
-    Usage(argv[0]);
-  }
-
-  unsigned short port = 0;
-  if (sscanf(argv[2], "%hu", &port) != 1) {
-    Usage(argv[0]);
-  }
-
-  // Get an appropriate sockaddr structure.
-  struct sockaddr_storage addr;
-  size_t addrlen;
-  if (!LookupName(argv[1], port, &addr, &addrlen)) {
-    Usage(argv[0]);
-  }
-
-  // Connect to the remote host.
-  int socket_fd;
-  if (!Connect(&addr, addrlen, &socket_fd)) {
-    Usage(argv[0]);
-  }
-
-  printf("Ready to communicate with %s:%s\n", argv[1], argv[2]);
-
-
-  int choice; 
-  do{
-    printf("Enter your choice (1 to put, 2 to get, 0 to quit): ");
-    scanf("%d", &choice);
-    getchar(); // consume the newline
-
-    switch(choice){
-      case 1:
-        put_record(socket_fd);
-      break;
-      case 2:
-        get_record(socket_fd);
-      break;
-      case 0:
-        break;
-      default:
-        printf("Invalid choice\n");
-        break;
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s hostname port\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
-  }while(choice != 0);
 
-  close(socket_fd);
-  return EXIT_SUCCESS;
-}
+    char *hostname = argv[1];
+    int port = atoi(argv[2]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port number\n");
+        exit(EXIT_FAILURE);
+    }
 
-void
-Usage(char *progname) {
-  printf("usage: %s  hostname port \n", progname);
-  exit(EXIT_FAILURE);
-}
+    // Open socket
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
 
-int
-LookupName(char *name,
-                unsigned short port,
-                struct sockaddr_storage *ret_addr,
-                size_t *ret_addrlen) {
-  struct addrinfo hints, *results;
-  int retval;
+    // Initialize server address structure
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, hostname, &server_addr.sin_addr) <= 0) {
+        perror("inet_pton");
+        close(sock_fd);
+        exit(EXIT_FAILURE);
+    }
 
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
+    // Connect to server
+    if (connect(sock_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("connect");
+        close(sock_fd);
+        exit(EXIT_FAILURE);
+    }
 
-  // Do the lookup by invoking getaddrinfo().
-  if ((retval = getaddrinfo(name, NULL, &hints, &results)) != 0) {
-    printf( "getaddrinfo failed: %s", gai_strerror(retval));
+    printf("Connected to server\n");
+
+    int choice;
+    do {
+        printf("Enter your choice (1 to put, 2 to get, 0 to quit): ");
+        scanf("%d", &choice);
+        getchar();  // Consume newline character
+
+        switch (choice) {
+            case PUT:
+                put_record(sock_fd);
+                break;
+            case GET:
+                get_record(sock_fd);
+                break;
+            case 0:
+                break;
+            default:
+                printf("Invalid choice\n");
+                break;
+        }
+    } while (choice != 0);
+
+    // Close socket
+    close(sock_fd);
+
     return 0;
-  }
-
-  // Set the port in the first result.
-  if (results->ai_family == AF_INET) {
-    struct sockaddr_in *v4addr =
-            (struct sockaddr_in *) (results->ai_addr);
-    v4addr->sin_port = htons(port);
-  } else if (results->ai_family == AF_INET6) {
-    struct sockaddr_in6 *v6addr =
-            (struct sockaddr_in6 *)(results->ai_addr);
-    v6addr->sin6_port = htons(port);
-  } else {
-    printf("getaddrinfo failed to provide an IPv4 or IPv6 address \n");
-    freeaddrinfo(results);
-    return 0;
-  }
-
-  // Return the first result.
-  assert(results != NULL);
-  memcpy(ret_addr, results->ai_addr, results->ai_addrlen);
-  *ret_addrlen = results->ai_addrlen;
-
-  // Clean up.
-  freeaddrinfo(results);
-  return 1;
 }
 
-int
-Connect(const struct sockaddr_storage *addr,
-             const size_t addrlen,
-             int *ret_fd) {
-  // Create the socket.
-  int socket_fd = socket(addr->ss_family, SOCK_STREAM, 0);
-  if (socket_fd == -1) {
-    printf("socket() failed: %s", strerror(errno));
-    return 0;
-  }
+void put_record(int sock_fd) {
+    // Prompt user for record details
+    struct record new_record;
+    printf("Enter the name: ");
+    fgets(new_record.name, MAX_NAME_LENGTH, stdin);
+    new_record.name[strcspn(new_record.name, "\n")] = '\0';  // Remove newline character
+    printf("Enter the id: ");
+    scanf("%u", &new_record.id);
+    getchar();  // Consume newline character
 
-  // Connect the socket to the remote host.
-  int res = connect(socket_fd,
-                    (const struct sockaddr *)(addr),
-                    addrlen);
-  if (res == -1) {
-    printf("connect() failed: %s", strerror(errno));
-    return 0;
-  }
+    // Send PUT message to server
+    struct msg request = {PUT, new_record};
+    if (send(sock_fd, &request, sizeof(request), 0) < 0) {
+        perror("send");
+        return;
+    }
 
+    // Receive response from server
+    struct msg response;
+    if (recv(sock_fd, &response, sizeof(response), 0) < 0) {
+        perror("recv");
+        return;
+    }
 
-  *ret_fd = socket_fd;
-  return 1;
+    // Print response
+    if (response.type == SUCCESS) {
+        printf("Put success.\n");
+    } else {
+        printf("Put failed.\n");
+    }
 }
 
-void put_record(int socket_fd){
-  struct record new_record;
-  printf("Enter the name: ");
-  fgets(new_record.name, MAX_NAME_LEN, stdin);
-  new_record.name[strlen(new_record.name) - 1] = "\0";
+void get_record(int sock_fd) {
+    // Prompt user for record id
+    struct record search_record;
+    printf("Enter the id: ");
+    scanf("%u", &search_record.id);
+    getchar();  // Consume newline character
 
-  printf("Enter the id: ");
-  char input[MAX_NAME_LEN];
-  fgets(input, MAX_NAME_LEN, stdin);
-  new_record.id = atoi(input);
+    // Send GET message to server
+    printf("Sending GET request for ID: %u\n", search_record.id);
+    struct msg request = {GET, search_record};
+    if (send(sock_fd, &request, sizeof(request), 0) < 0) {
+        perror("send");
+        return;
+    }
 
-  struct msg request = {PUT, new_record};
-  if(send(socket_fd, &request, sizeof(request), 0) <= 0){
-    printf("Error sending request\n");
-    return;
-  }
+    // Receive response from server
+    struct msg response;
+    if (recv(sock_fd, &response, sizeof(response), 0) < 0) {
+        perror("recv");
+        return;
+    }
 
-  struct msg response; 
-  if(recv(socket_fd, &response, sizeof(response), 0) <= 0){
-    printf("Error receiving response\n");
-    return;
-  }
-  if(response.type == SUCCESS){
-    printf("Put success\n");
-  }
-  else if (response.type == FAIL){
-    printf("put failed\n");
-  }
+    // Print response
+    if (response.type == SUCCESS) {
+        printf("name: %s\n", response.rd.name);
+        printf("id: %u\n", response.rd.id);
+    } else {
+        printf("Get failed.\n");
+    }
 }
-
-void get_record(int socket_fd){
-  uint32_t id;
-  printf("Enter the id: ");
-
-  char input[MAX_NAME_LEN];
-  fgets(input, MAX_NAME_LEN, stdin);
-  id = atoi(input);
-
-  struct record search_record;
-  search_record.id = id;
-  struct msg request = {GET, search_record};
-  if(send(socket_fd, &request, sizeof(request), 0) <= 0){
-    printf("Error sending request\n");
-    return;
-  }
-
-  struct msg response; 
-  if(recv(socket_fd, &response, sizeof(response), 0) <= 0){
-    printf("Error receiving response\n");
-    return;
-  }
-
-  if(response.type == SUCCESS){
-    printf("name: %s\n", search_record.name);
-    printf("id: %d\n", search_record.id);
-  }
-  else if (response.type == FAIL){
-    printf("get failed");
-  }
-} 

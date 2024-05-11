@@ -1,305 +1,180 @@
-#include <arpa/inet.h>
-#include <assert.h>
-#include <errno.h>
-#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/types.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include "msg.h"
 
-void Usage(char *progname);
-void PrintOut(int fd, struct sockaddr *addr, size_t addrlen);
-void PrintReverseDNS(struct sockaddr *addr, size_t addrlen);
-void PrintServerSide(int c_fd, int sock_family);
+#define DATABASE_FILE "database.txt"
+#define MAX_CLIENTS 10
 
-int  Listen(char *portnum, int *sock_family);
-void HandleClient(void *arg);
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
-int
-main(int argc, char **argv) {
-  // Expect the port number as a command line argument.
-  if (argc != 2) {
-    Usage(argv[0]);
-  }
+void *handle_client(void *arg);
 
-  int sock_family;
-  int listen_fd = Listen(argv[1], &sock_family);
-  if (listen_fd <= 0) {
-    // We failed to bind/listen to a socket.  Quit with failure.
-    printf("Couldn't bind to any addresses.\n");
-    return EXIT_FAILURE;
-  }
-
-  // Loop forever, accepting a connection from a client and doing
-  // an echo trick to it.
-  while (1) {
-    struct sockaddr_storage caddr;
-    socklen_t caddr_len = sizeof(caddr);
-    int c_fd = accept(listen_fd,
-                           (struct sockaddr *)(&caddr),
-                           &caddr_len);
-
-    if (c_fd < 0) {
-      if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK)){
-        continue;
-      }
-      printf("Failure on accept:%d \n ", strerror(errno));
-      break;
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s port\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
-    pthread_t tid;
-    pthread_create(&tid, NULL, HandleClient, (void *)c_fd);
-    pthread_detach(tid);
-  }
-
-
-  // Close socket
-  close(listen_fd);
-  return EXIT_SUCCESS;
-}
-
-void Usage(char *progname) {
-  printf("usage: %s port \n", progname);
-  exit(EXIT_FAILURE);
-}
-
-void
-PrintOut(int fd, struct sockaddr *addr, size_t addrlen) {
-  printf("Socket [%d] is bound to: \n", fd);
-  if (addr->sa_family == AF_INET) {
-    // Print out the IPV4 address and port
-
-    char astring[INET_ADDRSTRLEN];
-    struct sockaddr_in *in4 = (struct sockaddr_in *)(addr);
-    inet_ntop(AF_INET, &(in4->sin_addr), astring, INET_ADDRSTRLEN);
-    printf(" IPv4 address %s", astring);
-    printf(" and port %d\n", ntohs(in4->sin_port));
-
-  } else if (addr->sa_family == AF_INET6) {
-    // Print out the IPV6 address and port
-
-    char astring[INET6_ADDRSTRLEN];
-    struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)(addr);
-    inet_ntop(AF_INET6, &(in6->sin6_addr), astring, INET6_ADDRSTRLEN);
-    printf("IPv6 address %s", astring);
-    printf(" and port %d\n", ntohs(in6->sin6_port));
-
-  } else {
-    printf(" ???? address and port ???? \n");
-  }
-}
-
-void
-PrintReverseDNS(struct sockaddr *addr, size_t addrlen) {
-  char hostname[1024];  // ought to be big enough.
-  if (getnameinfo(addr, addrlen, hostname, 1024, NULL, 0, 0) != 0) {
-    sprintf(hostname, "[reverse DNS failed]");
-  }
-  printf("DNS name: %s \n", hostname);
-}
-
-void
-PrintServerSide(int c_fd, int sock_family) {
-  char hname[1024];
-  hname[0] = '\0';
-
-  printf("Server side interface is ");
-  if (sock_family == AF_INET) {
-    // The server is using an IPv4 address.
-    struct sockaddr_in srvr;
-    socklen_t srvrlen = sizeof(srvr);
-    char addrbuf[INET_ADDRSTRLEN];
-    getsockname(c_fd, (struct sockaddr *) &srvr, &srvrlen);
-    inet_ntop(AF_INET, &srvr.sin_addr, addrbuf, INET_ADDRSTRLEN);
-    printf("%s", addrbuf);
-    // Get the server's dns name, or return it's IP address as
-    // a substitute if the dns lookup fails.
-    getnameinfo((const struct sockaddr *) &srvr,
-                srvrlen, hname, 1024, NULL, 0, 0);
-    printf(" [%s]\n", hname);
-  } else {
-    // The server is using an IPv6 address.
-    struct sockaddr_in6 srvr;
-    socklen_t srvrlen = sizeof(srvr);
-    char addrbuf[INET6_ADDRSTRLEN];
-    getsockname(c_fd, (struct sockaddr *) &srvr, &srvrlen);
-    inet_ntop(AF_INET6, &srvr.sin6_addr, addrbuf, INET6_ADDRSTRLEN);
-    printf("%s", addrbuf);
-    // Get the server's dns name, or return it's IP address as
-    // a substitute if the dns lookup fails.
-    getnameinfo((const struct sockaddr *) &srvr,
-                srvrlen, hname, 1024, NULL, 0, 0);
-    printf(" [%s]\n", hname);
-  }
-}
-
-int
-Listen(char *portnum, int *sock_family) {
-
-  // Populate the "hints" addrinfo structure for getaddrinfo().
-  // ("man addrinfo")
-  struct addrinfo hints;
-  memset(&hints, 0, sizeof(struct addrinfo));
-  hints.ai_family = AF_INET;       // IPv6 (also handles IPv4 clients)
-  hints.ai_socktype = SOCK_STREAM;  // stream
-  hints.ai_flags = AI_PASSIVE;      // use wildcard "in6addr_any" address
-  hints.ai_flags |= AI_V4MAPPED;    // use v4-mapped v6 if no v6 found
-  hints.ai_protocol = IPPROTO_TCP;  // tcp protocol
-  hints.ai_canonname = NULL;
-  hints.ai_addr = NULL;
-  hints.ai_next = NULL;
-
-  // Use argv[1] as the string representation of our portnumber to
-  // pass in to getaddrinfo().  getaddrinfo() returns a list of
-  // address structures via the output parameter "result".
-  struct addrinfo *result;
-  int res = getaddrinfo(NULL, portnum, &hints, &result);
-
-  // Did addrinfo() fail?
-  if (res != 0) {
-	printf( "getaddrinfo failed: %s", gai_strerror(res));
-    return -1;
-  }
-
-  // Loop through the returned address structures until we are able
-  // to create a socket and bind to one.  The address structures are
-  // linked in a list through the "ai_next" field of result.
-  int listen_fd = -1;
-  struct addrinfo *rp;
-  for (rp = result; rp != NULL; rp = rp->ai_next) {
-    listen_fd = socket(rp->ai_family,
-                       rp->ai_socktype,
-                       rp->ai_protocol);
-    if (listen_fd == -1) {
-      // Creating this socket failed.  So, loop to the next returned
-      // result and try again.
-      printf("socket() failed:%d \n ", strerror(errno));
-      listen_fd = -1;
-      continue;
+    int port = atoi(argv[1]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port number\n");
+        exit(EXIT_FAILURE);
     }
 
-    // Configure the socket; we're setting a socket "option."  In
-    // particular, we set "SO_REUSEADDR", which tells the TCP stack
-    // so make the port we bind to available again as soon as we
-    // exit, rather than waiting for a few tens of seconds to recycle it.
-    int optval = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR,
-               &optval, sizeof(optval));
-
-    // Try binding the socket to the address and port number returned
-    // by getaddrinfo().
-    if (bind(listen_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
-      // Bind worked!  Print out the information about what
-      // we bound to.
-      PrintOut(listen_fd, rp->ai_addr, rp->ai_addrlen);
-
-      // Return to the caller the address family.
-      *sock_family = rp->ai_family;
-      break;
+    // Open socket
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
     }
 
-    // The bind failed.  Close the socket, then loop back around and
-    // try the next address/port returned by getaddrinfo().
-    close(listen_fd);
-    listen_fd = -1;
-  }
+    // Initialize server address structure
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port);
 
-  // Free the structure returned by getaddrinfo().
-  freeaddrinfo(result);
-
-  // If we failed to bind, return failure.
-  if (listen_fd == -1)
-    return listen_fd;
-
-  // Success. Tell the OS that we want this to be a listening socket.
-  if (listen(listen_fd, SOMAXCONN) != 0) {
-    printf("Failed to mark socket as listening:%d \n ", strerror(errno));
-    close(listen_fd);
-    return -1;
-  }
-
-  // Return to the client the listening file descriptor.
-  return listen_fd;
-}
-
-void HandleClient(void *arg) {
-  int c_fd = (int)arg;
-
-  struct msg request;
-  ssize_t byte_count = recv(c_fd, &request, sizeof(request), 0);
-  if (byte_count == -1) {
-    printf("Error on client socket: %s\n", strerror(errno));
-    close(c_fd);
-    pthread_exit(NULL);
-  } else if (byte_count == 0) {
-    close(c_fd);
-    pthread_exit(NULL);
-  }
-
-  if (request.type == PUT) {
-    // Write to db
-    FILE *database = fopen("db", "a");
-
-    if (database == NULL) {
-      printf("Error opening database: %s\n", strerror(errno));
-      close(c_fd);
-      pthread_exit(NULL);
+    // Bind socket to port
+    if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("bind");
+        close(listen_fd);
+        exit(EXIT_FAILURE);
     }
 
-    pthread_mutex_lock(&mutex);
-    fwrite(&request.rd, sizeof(request.rd), 1, database);
-    pthread_mutex_unlock(&mutex);
-
-    fclose(database);
-
-    // Success response
-    struct msg response = {SUCCESS};
-    if (send(c_fd, &response, sizeof(response), 0) == -1) {
-      printf("Error sending response: %s\n", strerror(errno));
-    }
-  } else if (request.type == GET) {
-    FILE *database = fopen("db", "r");
-
-    if (database == NULL) {
-      printf("Error opening database: %s\n", strerror(errno));
-      close(c_fd);
-      pthread_exit(NULL);
+    // Listen for connections
+    if (listen(listen_fd, MAX_CLIENTS) < 0) {
+        perror("listen");
+        close(listen_fd);
+        exit(EXIT_FAILURE);
     }
 
-    struct record found_record;
+    printf("Server listening on port %d\n", port);
 
-    pthread_mutex_lock(&mutex);
-    while (fread(&found_record, sizeof(found_record), 1, database) == 1) {
-      if (found_record.id == request.rd.id) {
-
-        struct msg response = {SUCCESS, found_record};
-        if (send(c_fd, &response, sizeof(response), 0) == -1) {
-          printf("Error sending response: %s\n", strerror(errno));
+    // Accept connections and create handler threads
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int *client_fd = malloc(sizeof(int));
+        *client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+        if (*client_fd < 0) {
+            perror("accept");
+            free(client_fd);
+            continue;
         }
-        pthread_mutex_unlock(&mutex);
-        close(c_fd);
-        fclose(database);
-        pthread_exit(NULL);
-      }
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, (void *)client_fd) != 0) {
+            perror("pthread_create");
+            free(client_fd);
+            continue;
+        }
+        pthread_detach(tid);
     }
 
-    pthread_mutex_unlock(&mutex);
-    fclose(database);
+    // Close socket
+    close(listen_fd);
 
-    // Failure response
-    struct msg response = {FAIL};
-    if (send(c_fd, &response, sizeof(response), 0) == -1) {
-      printf("Error sending response: %s\n", strerror(errno));
+    return 0;
+}
+
+void *handle_client(void *arg) {
+    int client_fd = *((int *)arg);
+    free(arg);
+
+    struct msg request;
+    ssize_t bytes_received;
+
+    while (1) {
+        // Receive client request
+        bytes_received = recv(client_fd, &request, sizeof(request), 0);
+        if (bytes_received < 0) {
+            perror("recv");
+            close(client_fd);
+            pthread_exit(NULL);
+        } else if (bytes_received == 0) {
+            close(client_fd);
+            pthread_exit(NULL);
+        }
+
+        // Handle client request
+        if (request.type == PUT) {
+            // Write record to database file
+            FILE *database = fopen(DATABASE_FILE, "a");
+            if (database == NULL) {
+                perror("fopen");
+                close(client_fd);
+                pthread_exit(NULL);
+            }
+            pthread_mutex_lock(&mutex);
+            fwrite(&request.rd, sizeof(request.rd), 1, database);
+            pthread_mutex_unlock(&mutex);
+            fclose(database);
+
+            // View the contents of the database file
+            FILE *viewDatabase = fopen(DATABASE_FILE, "r");
+            if (viewDatabase == NULL) {
+                perror("fopen");
+                close(client_fd);
+                pthread_exit(NULL);
+            }
+            printf("Contents of the database file after PUT:\n");
+            struct record temp_record;
+            while (fread(&temp_record, sizeof(temp_record), 1, viewDatabase) == 1) {
+                printf("Name: %s, ID: %d\n", temp_record.name, temp_record.id);
+            }
+            fclose(viewDatabase);
+
+            // Send success response
+            struct msg response = {SUCCESS};
+            if (send(client_fd, &response, sizeof(response), 0) < 0) {
+                perror("send");
+            }
+        } else if (request.type == GET) {
+            // Search for record in database file
+            FILE *database = fopen(DATABASE_FILE, "r");
+            if (database == NULL) {
+                perror("fopen");
+                close(client_fd);
+                pthread_exit(NULL);
+            }
+            struct record found_record;
+            pthread_mutex_lock(&mutex);
+            while (fread(&found_record, sizeof(found_record), 1, database) == 1) {
+                if (found_record.id == request.rd.id) {
+                    // Send found record as success response
+                    struct msg response = {SUCCESS, found_record};
+                    if (send(client_fd, &response, sizeof(response), 0) < 0) {
+                        perror("send");
+                    }
+                    pthread_mutex_unlock(&mutex);
+                    fclose(database);
+                    // Continue the loop to wait for next request
+                    break;
+                }
+            }
+
+            if (feof(database)) {
+                printf("Record not found for ID: %u\n", request.rd.id);
+                fclose(database);
+                pthread_mutex_unlock(&mutex);
+
+                // Send failure response
+                struct msg response = {FAIL};
+                if (send(client_fd, &response, sizeof(response), 0) < 0) {
+                    perror("send");
+                }
+            }
+        } else {
+            // Invalid request type
+            close(client_fd);
+            pthread_exit(NULL);
+        }
     }
-  } else {
-    close(c_fd);
-    pthread_exit(NULL);
-  }
-  close(c_fd);
-  pthread_exit(NULL);
 }
