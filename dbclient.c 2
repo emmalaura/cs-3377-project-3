@@ -21,7 +21,11 @@ int LookupName(char *name,
 int Connect(const struct sockaddr_storage *addr,
              const size_t addrlen,
              int *ret_fd);
-
+void putOperation(int socket_fd);
+void getOperation(int socket_fd);
+void quitOperation(int socket_fd);
+int sendMessage(int socket_fd, const char *message);
+int receiveMessage(int socket_fd, char *buffer, size_t buffer_size);
 int
 main(int argc, char **argv) {
   if (argc != 3) {
@@ -188,7 +192,7 @@ void putOperation(int socket_fd){
 
   sprintf(buffer, "put,%s,%d", name, id);
 
-if(sendMessage(socket_fd,buffer) && receiveMessage(socket_fd, buffer, BUF)){
+if (sendMessage(socket_fd, buffer) && receiveMessage(socket_fd, buffer, BUF)) {
   if(strcmp(buffer, "SUCCESS") == 0){
     printf("Put Success. \n");
   }
@@ -212,7 +216,7 @@ void getOperation(int socket_fd){
 
   sprintf(buffer, "get,%d", id);
 
-  if(sendMessage(socket_fd && buffer) && receiveMessage(socket_fd, buffer, BUF)){
+  if (sendMessage(socket_fd, buffer) && receiveMessage(socket_fd, buffer, BUF)) {
     if(strcmp(buffer, "SUCCESS") == 0)
     {
       if(receiveMessage(socket_fd, buffer, BUF)){
